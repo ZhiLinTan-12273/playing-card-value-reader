@@ -1,0 +1,6 @@
+cat << 'EOF' > requirements.txt
+opencv-python
+numpy
+matplotlib
+easygui
+EOF

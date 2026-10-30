@@ -25,16 +25,44 @@ def four_point_transform(image, pts):
     maxHeight = max(int(heightA), int(heightB))
 
     dst = np.array([
-		[0, 0],
-		[maxWidth - 1, 0],
-		[maxWidth - 1, maxHeight - 1],
-		[0, maxHeight - 1]], dtype = "float32")
+        [0, 0],
+        [maxWidth - 1, 0],
+        [maxWidth - 1, maxHeight - 1],
+        [0, maxHeight - 1]], dtype = "float32")
 
     M = cv2.getPerspectiveTransform(rect, dst)
     warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
 
     return warped
- 
+
+def find_cards(image):
+    lower_bound = np.array([0, 0, 0])
+    upper_bound = np.array([150, 150, 150])
+    mask = cv2.inRange(image, lower_bound, upper_bound)
+
+    card_mask = cv2.bitwise_not(mask)
+    contours, _ = cv2.findContours(card_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    warped_cards = []
+
+    for cnt in contours:
+        if cv2.contourArea(cnt) > 2000:
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+
+            if len(approx) == 4:
+                pts = approx.reshape(4, 2)
+                warped = four_point_transform(image, pts)
+
+                h, w = warped.shape[:2]
+                if w > h:
+                    warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
+
+                card_200x300 = cv2.resize(warped, (200, 300))
+                warped_cards.append(card_200x300)
+
+    return warped_cards
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 image_path = os.path.join(BASE_DIR, 'test_images', '1_simple', 'card1.jpg')
 image = cv2.imread(image_path)
@@ -43,34 +71,12 @@ if image is None:
     print("Cant find image")
     exit()
 
-lower_bound = np.array([0, 0, 0])
-upper_bound = np.array([150, 150, 150])
-mask = cv2.inRange(image, lower_bound, upper_bound)
+cards = find_cards(image)
 
-card_mask = cv2.bitwise_not(mask)
-contours, _ = cv2.findContours(card_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-card_contours = []
-
-for cnt in contours:
-    if cv2.contourArea(cnt) > 2000:
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-
-        if len(approx) == 4:
-            card_contours.append(approx)
-output = image.copy()
-cv2.drawContours(output, card_contours, -1, (0, 255, 0), 3)
-
-for card in card_contours:
-    for point in card:
-        x, y = point[0]
-        cv2.circle(output, (x, y), 8, (0, 0, 255), -1)
-
-if len(card_contours) > 0:
-    pts = card_contours[0].reshape(4, 2)
-    warped = four_point_transform(image, pts)
-    cv2.imshow("Warped Card", warped)
-
+for idx, card in enumerate(cards):
+    filename = f"card_{idx + 1}.jpg"
+    cv2.imwrite(filename, card)
+    cv2.imshow(f"Card {idx + 1}", card)
 
 cv2.waitKey(0)
 cv2.destroyAllWindows()

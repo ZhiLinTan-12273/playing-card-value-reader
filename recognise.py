@@ -1,7 +1,8 @@
 # recognise.py - Member B: read the rank and suit of one upright card.
 # Methods: Otsu thresholding (Segmentation lab), contours (Features lab),
-# cv2.matchTemplate (OpenCV docs). Contour-based symbol splitting suggested
-# by Claude (Anthropic, 2026); tested and adjusted by me.
+# cv2.matchTemplate (OpenCV docs). Contour-based symbol splitting, template
+# caching and match scores suggested by Claude (Anthropic, 2026);
+# tested and adjusted by me.
 
 import os
 import cv2
@@ -9,11 +10,14 @@ import cv2
 CORNER = (110, 45)        # top-left region to search: (height, width)
 RANK_SIZE = (30, 45)      # fixed sizes so symbols can be compared with templates
 SUIT_SIZE = (30, 30)
+MIN_SCORE = 0.5           # below this, the card is reported as 'unknown'
 
 # Names must match answers.csv exactly
 RANKS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
 SUITS = ['hearts', 'diamonds', 'clubs', 'spades']
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+
+_templates = None         # loaded once, then reused for every card
 
 
 def crop_boxes(binary, boxes, size):
@@ -57,48 +61,75 @@ def extract_symbols(card_img):
 
 
 def load_templates(names, prefix):
-    """Load templates like templates/rank_K.png into a dictionary."""
+    """Read templates like templates/rank_K.png into a dictionary,
+    skipping any that haven't been made yet."""
     templates = {}
     for name in names:
-        img = cv2.imread(os.path.join(TEMPLATE_DIR, f'{prefix}_{name}.png'), cv2.IMREAD_GRAYSCALE)
-        if img is not None:
-            templates[name] = img
+        path = os.path.join(TEMPLATE_DIR, f'{prefix}_{name}.png')
+        if os.path.exists(path):
+            templates[name] = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     return templates
 
 
-def best_match(symbol, templates, min_score=0.5):
-    """Return the name of the most similar template, or 'unknown'."""
-    best_name, best_score = 'unknown', min_score
+def get_templates():
+    """Load all templates the first time they are needed, then reuse them."""
+    global _templates
+    if _templates is None:
+        _templates = {'rank': load_templates(RANKS, 'rank'),
+                      'suit': load_templates(SUITS, 'suit')}
+    return _templates
+
+
+def best_match(symbol, templates, method=cv2.TM_CCOEFF_NORMED):
+    """Compare a symbol with every template.
+    Returns (name, score); score is 0-1 where higher means more similar."""
+    best_name, best_score = 'unknown', 0.0
     for name, tmpl in templates.items():
-        score = cv2.matchTemplate(symbol, tmpl, cv2.TM_CCOEFF_NORMED)[0][0]
+        score = cv2.matchTemplate(symbol, tmpl, method)[0][0]
+        if method == cv2.TM_SQDIFF_NORMED:   # this method: lower = better
+            score = 1 - score
         if score > best_score:
             best_name, best_score = name, score
-    return best_name
+    if best_score < MIN_SCORE:
+        best_name = 'unknown'
+    return best_name, best_score
 
 
-def identify_card(card_img):
-    """Input: upright 200 x 300 card. Output: (rank, suit), e.g. ('K', 'hearts')."""
+def identify_card(card_img, method=cv2.TM_CCOEFF_NORMED, with_scores=False):
+    """Input: upright 200 x 300 card.
+    Output: (rank, suit), e.g. ('K', 'hearts').
+    With with_scores=True: (rank, suit, rank_score, suit_score)."""
     rank_sym, suit_sym = extract_symbols(card_img)
     if rank_sym is None:
-        return ('unknown', 'unknown')
-    return (best_match(rank_sym, load_templates(RANKS, 'rank')),
-            best_match(suit_sym, load_templates(SUITS, 'suit')))
+        return ('unknown', 'unknown', 0.0, 0.0) if with_scores else ('unknown', 'unknown')
+
+    t = get_templates()
+    rank, rank_score = best_match(rank_sym, t['rank'], method)
+    suit, suit_score = best_match(suit_sym, t['suit'], method)
+    if with_scores:
+        return rank, suit, rank_score, suit_score
+    return rank, suit
 
 
 def save_templates(card_img, rank, suit):
     """Make templates from a card I know, e.g. save_templates(card, 'K', 'hearts')."""
+    global _templates
     rank_sym, suit_sym = extract_symbols(card_img)
+    if rank_sym is None:
+        print(f'Could not find symbols for {rank} of {suit}')
+        return
     os.makedirs(TEMPLATE_DIR, exist_ok=True)
     cv2.imwrite(os.path.join(TEMPLATE_DIR, f'rank_{rank}.png'), rank_sym)
     cv2.imwrite(os.path.join(TEMPLATE_DIR, f'suit_{suit}.png'), suit_sym)
+    _templates = None        # force a reload next time
 
 
 if __name__ == '__main__':
     tests = [('test_images/single_cards/kh.jpg', 'K', 'hearts'),
              ('test_images/warped/ah.jpg', 'A', 'hearts')]
     for path, rank, suit in tests:
-        card = cv2.resize(cv2.imread(path), (200, 300))
-        save_templates(card, rank, suit)
+        save_templates(cv2.resize(cv2.imread(path), (200, 300)), rank, suit)
     for path, _, _ in tests:
         card = cv2.resize(cv2.imread(path), (200, 300))
-        print(path, '->', identify_card(card))
+        rank, suit, rs, ss = identify_card(card, with_scores=True)
+        print(f'{path} -> ({rank}, {suit})  scores: rank {rs:.2f}, suit {ss:.2f}')

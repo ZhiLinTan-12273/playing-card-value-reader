@@ -1,8 +1,8 @@
 # recognise.py - Member B: read the rank and suit of one upright card.
 # Methods: Otsu thresholding (Segmentation lab), contours (Features lab),
 # cv2.matchTemplate (OpenCV docs). Contour-based symbol splitting, template
-# caching and match scores suggested by Claude (Anthropic, 2026);
-# tested and adjusted by me.
+# caching, match scores and the green-channel threshold suggested by
+# Claude (Anthropic, 2026); tested and adjusted by me on our own deck.
 
 import os
 import cv2
@@ -33,8 +33,11 @@ def extract_symbols(card_img):
     """Find the rank and suit in the top-left corner.
     Returns (rank_symbol, suit_symbol), or (None, None) if not found."""
     corner = card_img[0:CORNER[0], 0:CORNER[1]]
-    gray = cv2.cvtColor(corner, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Green channel: red and black ink are both dark in it, while the white
+    # card stays bright, so red symbols get much better contrast than in
+    # plain greyscale (tested on our deck: fewer failures than greyscale)
+    green = corner[:, :, 1]
+    _, binary = cv2.threshold(green, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     # Keep symbol shapes; drop specks and shapes cut by the edge of the corner
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -125,11 +128,9 @@ def save_templates(card_img, rank, suit):
 
 
 if __name__ == '__main__':
-    tests = [('test_images/single_cards/kh.jpg', 'K', 'hearts'),
-             ('test_images/warped/ah.jpg', 'A', 'hearts')]
-    for path, rank, suit in tests:
-        save_templates(cv2.resize(cv2.imread(path), (200, 300)), rank, suit)
-    for path, _, _ in tests:
+    # Templates now come from our own deck: run  python test_deck.py
+    # This quick check only reads the cards, it does not change any templates.
+    for path in ['test_images/single_cards/kh.jpg', 'test_images/warped/ah.jpg']:
         card = cv2.resize(cv2.imread(path), (200, 300))
         rank, suit, rs, ss = identify_card(card, with_scores=True)
         print(f'{path} -> ({rank}, {suit})  scores: rank {rs:.2f}, suit {ss:.2f}')

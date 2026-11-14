@@ -36,35 +36,50 @@ def four_point_transform(image, pts):
     return warped
 
 def find_cards(image):
-    lower_bound = np.array([0, 0, 0])
-    upper_bound = np.array([150, 150, 150])
-    mask = cv2.inRange(image, lower_bound, upper_bound)
+    h, w, d = image.shape
+    scale = 800.0 / w
+    I_resized = cv2.resize(image, dsize=(800, int(h * scale)))
 
-    card_mask = cv2.bitwise_not(mask)
-    contours, _ = cv2.findContours(card_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+    G = cv2.cvtColor(I_resized, cv2.COLOR_BGR2GRAY)
+    G_blur = cv2.GaussianBlur(G, (5, 5), 0)
+
+    E = cv2.Canny(G_blur, threshold1=20, threshold2=80)
+
+    shape = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    Closed = cv2.morphologyEx(E, cv2.MORPH_CLOSE, shape)
+
+    contours, _ = cv2.findContours(Closed, mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_NONE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
     warped_cards = []
+    img_area = I_resized.shape[0] * I_resized.shape[1]
 
-    for cnt in contours:
-        if cv2.contourArea(cnt) > 2000:
-            peri = cv2.arcLength(cnt, True)
-            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+    for c in contours:
+        A = cv2.contourArea(c)
+        if img_area * 0.03 < A < img_area * 0.90:
+            rect = cv2.minAreaRect(c)
+            (w_rect, h_rect) = rect[1]
 
-            if len(approx) == 4:
-                pts = approx.reshape(4, 2)
+            if w_rect == 0 or h_rect == 0:
+                continue
+
+            aspect_ratio = max(w_rect, h_rect) / min(w_rect, h_rect)
+            if 1.15 < aspect_ratio < 1.85:
+                box = cv2.boxPoints(rect)
+                pts = (box / scale).astype("float32")
                 warped = four_point_transform(image, pts)
 
-                h, w = warped.shape[:2]
-                if w > h:
+                wh, ww = warped.shape[:2]
+                if ww > wh:
                     warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
 
-                card_200x300 = cv2.resize(warped, (200, 300))
+                card_200x300 = cv2.resize(warped, dsize=(200, 300))
                 warped_cards.append(card_200x300)
 
     return warped_cards
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-image_path = os.path.join(BASE_DIR, 'test_images', '1_simple', 'card1.jpg')
+image_path = os.path.join(BASE_DIR, 'test_images', 'deck', 'templates' , '10_spades.jpg')
 image = cv2.imread(image_path)
 
 if image is None:

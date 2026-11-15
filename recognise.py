@@ -1,7 +1,7 @@
 # recognise.py - Member B: read the rank and suit of one upright card.
 # Methods: Otsu thresholding (Segmentation lab), contours (Features lab),
 # cv2.matchTemplate (OpenCV docs). Contour-based symbol splitting, template
-# caching, match scores and the green-channel threshold suggested by
+# caching, match scores and the green-channel adaptive threshold suggested by
 # Claude (Anthropic, 2026); tested and adjusted by me on our own deck.
 
 import os
@@ -34,10 +34,12 @@ def extract_symbols(card_img):
     Returns (rank_symbol, suit_symbol), or (None, None) if not found."""
     corner = card_img[0:CORNER[0], 0:CORNER[1]]
     # Green channel: red and black ink are both dark in it, while the white
-    # card stays bright, so red symbols get much better contrast than in
-    # plain greyscale (tested on our deck: fewer failures than greyscale)
-    green = corner[:, :, 1]
-    _, binary = cv2.threshold(green, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # card stays bright. Adaptive thresholding (Segmentation lab) compares each
+    # pixel with its neighbourhood, so a strip of table or glare at the edge of
+    # the crop no longer spoils the threshold for the whole corner.
+    green = cv2.GaussianBlur(corner[:, :, 1], (3, 3), 0)
+    binary = cv2.adaptiveThreshold(green, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                   cv2.THRESH_BINARY_INV, 21, 10)
 
     # Keep symbol shapes; drop specks and shapes cut by the edge of the corner
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

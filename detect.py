@@ -1,15 +1,17 @@
 import os
+import glob
 import cv2
 import numpy as np
+from recognise import identify_card
 
 def order_point(pts):
-    rect = np.zeros((4, 2), dtype = "float32")
+    rect = np.zeros((4, 2), dtype = "float32") #ready for 4 space
     s = pts.sum(axis = 1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
+    rect[0] = pts[np.argmin(s)] #x + y top left
+    rect[2] = pts[np.argmax(s)] #x + y botton right
     diff = np.diff(pts, axis = 1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
+    rect[1] = pts[np.argmin(diff)] # y - x top right
+    rect[3] = pts[np.argmax(diff)] # y - x botton left
 
     return rect
 
@@ -31,67 +33,155 @@ def four_point_transform(image, pts):
         [0, maxHeight - 1]], dtype = "float32")
 
     M = cv2.getPerspectiveTransform(rect, dst)
-    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+    return cv2.warpPerspective(image, M, (maxWidth, maxHeight))
 
-    return warped
 
-def find_cards(image):
+def find_cards(image, use_minrect=False, inset=0.0):
     h, w, d = image.shape
-    scale = 800.0 / w
+    scale = 800.0 / w # Shrink the image cuz processing will bit fast
     I_resized = cv2.resize(image, dsize=(800, int(h * scale)))
 
     G = cv2.cvtColor(I_resized, cv2.COLOR_BGR2GRAY)
     G_blur = cv2.GaussianBlur(G, (5, 5), 0)
 
-    E = cv2.Canny(G_blur, threshold1=20, threshold2=80)
-
-    shape = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    Closed = cv2.morphologyEx(E, cv2.MORPH_CLOSE, shape)
-
-    contours, _ = cv2.findContours(Closed, mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_NONE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
     warped_cards = []
     img_area = I_resized.shape[0] * I_resized.shape[1]
 
-    for c in contours:
-        A = cv2.contourArea(c)
-        if img_area * 0.03 < A < img_area * 0.90:
-            rect = cv2.minAreaRect(c)
-            (w_rect, h_rect) = rect[1]
+    attempts = [(15, 70, 7), (8, 35, 9), (4, 18, 11)]
 
-            if w_rect == 0 or h_rect == 0:
+    for t1, t2, k in attempts:
+        E = cv2.Canny(G_blur, threshold1=t1, threshold2=t2)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        Closed = cv2.morphologyEx(E, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(Closed, mode=cv2.RETR_EXTERNAL,
+                                       method=cv2.CHAIN_APPROX_NONE)
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+        for c in contours:
+            A = cv2.contourArea(c)
+            if not (img_area * 0.03 < A < img_area * 0.90):
                 continue
 
-            aspect_ratio = max(w_rect, h_rect) / min(w_rect, h_rect)
-            if 1.15 < aspect_ratio < 1.85:
-                box = cv2.boxPoints(rect)
-                pts = (box / scale).astype("float32")
-                warped = four_point_transform(image, pts)
+            peri = cv2.arcLength(c, True)
+            pts = None
 
-                wh, ww = warped.shape[:2]
-                if ww > wh:
-                    warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
+            if not use_minrect:
+                for eps in [0.02, 0.03, 0.04, 0.05]:
+                    approx = cv2.approxPolyDP(c, eps * peri, True)
+                    if len(approx) == 4:
+                        pts = approx.reshape(4, 2)
+                        break
 
-                card_200x300 = cv2.resize(warped, dsize=(200, 300))
-                warped_cards.append(card_200x300)
+            if pts is None:
+                rect = cv2.minAreaRect(c)
+                (w_rect, h_rect) = rect[1]
+                if w_rect == 0 or h_rect == 0:
+                    continue
+                aspect_ratio = max(w_rect, h_rect) / min(w_rect, h_rect)
+                if 1.15 < aspect_ratio < 1.85:
+                    pts = cv2.boxPoints(rect)
+
+            if pts is None:
+                continue
+
+            pts_orig = (pts / scale).astype("float32")
+            warped = four_point_transform(image, pts_orig)
+
+            wh, ww = warped.shape[:2]
+            if ww > wh:
+                warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
+
+            hh, ww = warped.shape[:2]
+            my, mx = int(hh * inset), int(ww * inset)
+            if my > 0 and mx > 0:
+                warped = warped[my:hh - my, mx:ww - mx]
+
+            warped_cards.append(cv2.resize(warped, dsize=(200, 300)))
+
+        if warped_cards:  
+            break
 
     return warped_cards
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-image_path = os.path.join(BASE_DIR, 'test_images', 'deck', 'templates' , '10_spades.jpg')
-image = cv2.imread(image_path)
 
-if image is None:
-    print("Cant find image")
-    exit()
+def score_of(card):
+    best = (0, 0.0)
+    for img in (card, cv2.rotate(card, cv2.ROTATE_180)):
+        r, s, rs, ss = identify_card(img, with_scores=True)
+        known = (r != "unknown") + (s != "unknown")
+        total = (rs if r != "unknown" else 0) + (ss if s != "unknown" else 0)
+        best = max(best, (known, total))
+    return best
 
-cards = find_cards(image)
 
-for idx, card in enumerate(cards):
-    filename = f"card_{idx + 1}.jpg"
-    cv2.imwrite(filename, card)
-    cv2.imshow(f"Card {idx + 1}", card)
+def identify_any_orientation(card):
+    best = None
+    for img in (card, cv2.rotate(card, cv2.ROTATE_180)):
+        rank, suit = identify_card(img)
+        score = (rank != "unknown") + (suit != "unknown")
+        if best is None or score > best[0]:
+            best = (score, rank, suit)
+    if best[0] == 2:
+        return best[1], best[2]
 
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+    best = None
+    for base in (card, cv2.rotate(card, cv2.ROTATE_180)):
+        for s in (1.0, 0.96, 1.04, 0.92, 1.08, 0.88, 1.12):
+            M = cv2.getRotationMatrix2D((100, 150), 0, s)
+            img = cv2.warpAffine(base, M, (200, 300),
+                                 borderMode=cv2.BORDER_REPLICATE)
+            rank, suit, rs, ss = identify_card(img, with_scores=True)
+            known = (rank != "unknown") + (suit != "unknown")
+            total = (rs if rank != "unknown" else 0) + (ss if suit != "unknown" else 0)
+            key = (known, total)
+            if best is None or key > best[0]:
+                best = (key, rank, suit)
+    return best[1], best[2]
+
+
+def get_best_card(image):
+    first = find_cards(image)
+    if len(first) == 1 and score_of(first[0])[0] == 2:
+        return first[0]
+
+    candidates = list(first) if len(first) == 1 else []
+    for use_minrect in (False, True):
+        for inset in (0.0, 0.02, 0.04, 0.06):
+            c = find_cards(image, use_minrect=use_minrect, inset=inset)
+            if len(c) == 1:
+                candidates.append(c[0])
+    if not candidates:
+        return None
+    return max(candidates, key=score_of)
+
+
+if __name__ == "__main__":
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    test_images = sorted(glob.glob(os.path.join(BASE_DIR, 'test_images', 'deck', 'test', '*.jpg')))
+
+    correct = 0
+    for img_path in test_images:
+        filename = os.path.basename(img_path)
+        expected_rank, expected_suit = filename.replace('.jpg', '').split('_')
+
+        image = cv2.imread(img_path)
+        card = get_best_card(image)
+
+        if card is None:
+            print(f"[detect fail] {filename}: can find")
+            continue
+
+        rank, suit = identify_any_orientation(card)
+        if rank == expected_rank and suit == expected_suit:
+            correct += 1
+        else:
+            print(f"[detect error] {filename}: the card it thought ({rank}, {suit})")
+            os.makedirs("debug", exist_ok=True)
+            cv2.imwrite(f"debug/{filename}", card)
+            corner = card[0:110, 0:45]
+            cv2.imwrite(f"debug/{filename}_corner.png",
+                        cv2.resize(corner, None, fx=4, fy=4,
+                                   interpolation=cv2.INTER_NEAREST))
+
+    print(f"\nfinal result: {correct}/{len(test_images)} correct ({correct/len(test_images)*100:.0f}%)")

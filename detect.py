@@ -36,7 +36,10 @@ def four_point_transform(image, pts):
     return cv2.warpPerspective(image, M, (maxWidth, maxHeight))
 
 
-def find_cards(image, use_minrect=False, inset=0.0):
+def find_cards(image, use_minrect=False, inset=0.0, return_outlines=False):
+    """Find every card in a BGR photo and straighten it to 200 x 300.
+    Returns a list of cards, or (card, outline) pairs when return_outlines=True;
+    the outline is the card's 4 corners in the ORIGINAL photo, for drawing."""
     h, w, d = image.shape
     scale = 800.0 / w # Shrink the image cuz processing will bit fast
     I_resized = cv2.resize(image, dsize=(800, int(h * scale)))
@@ -45,6 +48,7 @@ def find_cards(image, use_minrect=False, inset=0.0):
     G_blur = cv2.GaussianBlur(G, (5, 5), 0)
 
     warped_cards = []
+    outlines = []
     img_area = I_resized.shape[0] * I_resized.shape[1]
 
     attempts = [(15, 70, 7), (8, 35, 9), (4, 18, 11)]
@@ -98,10 +102,13 @@ def find_cards(image, use_minrect=False, inset=0.0):
                 warped = warped[my:hh - my, mx:ww - mx]
 
             warped_cards.append(cv2.resize(warped, dsize=(200, 300)))
+            outlines.append(order_point(pts_orig).astype(np.int32).reshape(-1, 1, 2))
 
         if warped_cards:  
             break
 
+    if return_outlines:
+        return list(zip(warped_cards, outlines))
     return warped_cards
 
 
@@ -113,6 +120,39 @@ def score_of(card):
         total = (rs if r != "unknown" else 0) + (ss if s != "unknown" else 0)
         best = max(best, (known, total))
     return best
+
+
+def grow_outline(outline, fw, fh):
+    """Grow a 4-corner outline around its centre: fw times wider, fh times taller."""
+    tl, tr, br, bl = order_point(np.float32(outline).reshape(4, 2))
+    centre = (tl + tr + br + bl) / 4
+    u = ((tr - tl) + (br - bl)) / 4      # half the width, along the card
+    v = ((bl - tl) + (br - tr)) / 4      # half the height, along the card
+    return np.float32([centre - fw * u - fh * v, centre + fw * u - fh * v,
+                       centre + fw * u + fh * v, centre - fw * u + fh * v])
+
+
+def rescue_card(image, outline):
+    """For a card whose corner could not be read. On face cards on a light
+    table, find_cards sometimes only finds the picture frame in the middle, so
+    the rank and suit in the corner are cut off. Grow the outline step by step
+    (up to 1.6 times wider/taller), straighten each version, and keep the one
+    that identify_card reads best. Returns (card, outline) or None."""
+    best = None
+    for fw in np.arange(1.0, 1.61, 0.05):
+        for fh in np.arange(1.0, 1.61, 0.05):
+            pts = grow_outline(outline, fw, fh)
+            warped = four_point_transform(image, pts)
+            if warped.shape[1] > warped.shape[0]:
+                warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
+            warped = cv2.resize(warped, dsize=(200, 300))
+            key = score_of(warped)
+            if best is None or key > best[0]:
+                best = (key, warped, pts)
+    known = best[0][0]
+    if known < 2:                         # still can't read rank AND suit
+        return None
+    return best[1], best[2].astype(np.int32).reshape(-1, 1, 2)
 
 
 def identify_any_orientation(card):

@@ -18,9 +18,8 @@ import cv2
 import numpy as np
 import streamlit as st
 
-from detect import four_point_transform, score_of
 from pipeline import run_pipeline
-from recognise import extract_symbols
+from recognise import extract_symbols, identify_card
 from score import card_value, draw_results
 
 SUIT_SYMBOL = {'hearts': '♥', 'diamonds': '♦', 'clubs': '♣', 'spades': '♠'}
@@ -53,14 +52,31 @@ def read_upload(uploaded):
     return image
 
 
+def order_corners(pts):
+    """4 corners -> top-left, top-right, bottom-right, bottom-left."""
+    s, d = pts.sum(axis=1), np.diff(pts, axis=1).ravel()
+    return np.float32([pts[np.argmin(s)], pts[np.argmin(d)], pts[np.argmax(s)], pts[np.argmax(d)]])
+
+
+def read_quality(card):
+    """How well a card can be read: (rank and suit both found, total match score)."""
+    rank, suit, rs, ss = identify_card(card, with_scores=True)
+    return ((rank != 'unknown') + (suit != 'unknown'), rs + ss)
+
+
 def straighten(image, outline):
-    """Cut one card out of the photo, upright and the right way up, 200 x 300."""
-    card = four_point_transform(image, np.float32(outline).reshape(4, 2))
+    """Cut one card out of the photo, upright and the right way up, 200 x 300.
+    Only used to SHOW the cards - the reading itself happens in pipeline.py."""
+    src = order_corners(np.float32(outline).reshape(4, 2))
+    w = int(max(np.linalg.norm(src[1] - src[0]), np.linalg.norm(src[2] - src[3])))
+    h = int(max(np.linalg.norm(src[3] - src[0]), np.linalg.norm(src[2] - src[1])))
+    dst = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
+    card = cv2.warpPerspective(image, cv2.getPerspectiveTransform(src, dst), (w, h))
     if card.shape[1] > card.shape[0]:
         card = cv2.rotate(card, cv2.ROTATE_90_CLOCKWISE)
     card = cv2.resize(card, (200, 300))
     flipped = cv2.rotate(card, cv2.ROTATE_180)
-    return flipped if score_of(flipped) > score_of(card) else card
+    return flipped if read_quality(flipped) > read_quality(card) else card
 
 
 def rgb(img):

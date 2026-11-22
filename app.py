@@ -24,10 +24,12 @@ from score import card_value, draw_results
 
 SUIT_SYMBOL = {'hearts': '♥', 'diamonds': '♦', 'clubs': '♣', 'spades': '♠'}
 RED = ('hearts', 'diamonds')
-SAMPLES = {'Four fives (test_images/4card.jpg)': 'test_images/4card.jpg',
+SAMPLES = {'Four fives (4 cards in one photo)': 'test_images/4card.jpg',
            'King of diamonds (face card)': 'test_images/deck/test/K_diamonds.jpg',
            'Ten of hearts': 'test_images/deck/test/10_hearts.jpg',
-           'Ace of spades': 'test_images/deck/test/A_spades.jpg'}
+           'Seven of clubs': 'test_images/deck/test/7_clubs.jpg',
+           'Queen of hearts': 'test_images/deck/test/Q_hearts.jpg'}
+SAMPLES = {name: path for name, path in SAMPLES.items() if os.path.exists(path)}
 
 
 # ---------- helpers ----------
@@ -125,8 +127,8 @@ with tab_try:
         st.info('Tip: take the photo from above, in good light, with a little '
                 'space between the cards.')
 
-    if uploaded is not None and photo is None:
-        st.error('Sorry, that file could not be read as an image.')
+    if photo is None and (uploaded is not None or sample != '—'):
+        st.error('Sorry, that photo could not be read as an image.')
     elif photo is not None:
         with st.spinner('Finding and reading cards…'):
             results, total = run_pipeline(photo)

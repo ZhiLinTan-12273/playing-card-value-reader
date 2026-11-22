@@ -80,6 +80,16 @@ def straighten(image, outline):
     return flipped if read_quality(flipped) > read_quality(card) else card
 
 
+def same_size(img, w=300, h=400):
+    """Fit an image into a w x h frame (white bars), so thumbnails line up."""
+    scale = min(w / img.shape[1], h / img.shape[0])
+    img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    frame = np.full((h, w, 3), 255, np.uint8)
+    y, x = (h - img.shape[0]) // 2, (w - img.shape[1]) // 2
+    frame[y:y + img.shape[0], x:x + img.shape[1]] = img
+    return frame
+
+
 def rgb(img):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
@@ -153,7 +163,8 @@ with tab_try:
 
 @st.cache_data(show_spinner=False)
 def evaluate_all():
-    """Run the whole pipeline on every photo in answers.csv that exists."""
+    """Run the whole pipeline on every photo in answers.csv that exists.
+    Also keeps a small copy of each photo with the cards outlined and labelled."""
     rows = []
     with open('answers.csv', newline='') as f:
         for row in csv.DictReader(f):
@@ -163,9 +174,15 @@ def evaluate_all():
             truth = [tuple(c.strip().split('-')) for c in row['cards'].split(';')]
             results, total = run_pipeline(image)
             found = [(r, s) for r, s, _ in results]
+
+            scale = 400 / max(image.shape[:2])
+            small = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            small_results = [(r, s, (np.float32(o) * scale).astype(np.int32)) for r, s, o in results]
             rows.append({'file': row['file'], 'truth': truth, 'found': found,
                          'cards_right': sum((Counter(found) & Counter(truth)).values()),
-                         'true_total': int(row['total']), 'total': total})
+                         'true_total': int(row['total']), 'total': total,
+                         'correct': found == truth,
+                         'picture': rgb(same_size(draw_results(small, small_results, total)))})
     return rows
 
 
@@ -173,7 +190,7 @@ with tab_results:
     st.write('The whole system run on every photo in answers.csv. '
              'None of these photos were used to make the templates.')
     if st.button('Run evaluation'):
-        with st.spinner('Reading every test photo...'):
+        with st.spinner('Reading every test photo (about 30 seconds)...'):
             st.session_state['rows'] = evaluate_all()
 
     rows = st.session_state.get('rows')
@@ -181,20 +198,39 @@ with tab_results:
         n_cards = sum(len(r['truth']) for r in rows)
         cards_right = sum(r['cards_right'] for r in rows)
         totals_right = sum(r['total'] == r['true_total'] for r in rows)
-        c1, c2, c3 = st.columns(3)
-        c1.metric('Photos', len(rows))
-        c2.metric('Cards correct', f'{100 * cards_right / n_cards:.1f}%',
-                  help=f'{cards_right} of {n_cards} cards')
-        c3.metric('Totals correct', f'{100 * totals_right / len(rows):.1f}%',
-                  help=f'{totals_right} of {len(rows)} photos')
+        wrong = [r for r in rows if not r['correct']]
 
-        table = [{'Photo': r['file'],
-                  'Expected': ', '.join(card_name(*c) for c in r['truth']),
-                  'Read as': ', '.join(card_name(*c) for c in r['found']) or '-',
-                  'Total': f"{r['total']} / {r['true_total']}",
-                  'Correct': 'Yes' if r['found'] == r['truth'] else 'No'}
-                 for r in rows]
-        only_wrong = st.checkbox('Show only mistakes')
-        if only_wrong:
-            table = [t for t in table if t['Correct'] == 'No']
-        st.dataframe(table, use_container_width=True, hide_index=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric('Cards read correctly', f'{cards_right} / {n_cards}')
+        c2.metric('Correct total score', f'{totals_right} / {len(rows)}')
+        c3.metric('Accuracy', f'{100 * cards_right / n_cards:.1f}%')
+
+        if wrong:
+            st.subheader(f'Mistakes ({len(wrong)})')
+            for r in wrong:
+                c1, c2 = st.columns([1, 2])
+                c1.image(r['picture'], use_container_width=True)
+                c2.markdown(f"**{r['file']}**")
+                c2.write(f"Expected: {', '.join(card_name(*c) for c in r['truth'])} "
+                         f"(total {r['true_total']})")
+                c2.write(f"Read as: {', '.join(card_name(*c) for c in r['found']) or 'no card found'} "
+                         f"(total {r['total']})")
+        else:
+            st.success(f'All {len(rows)} test photos were read correctly.')
+
+        st.subheader('All test photos')
+        st.caption('Each photo with the card outline and the reading the system produced.')
+        cols = st.columns(4)
+        for i, r in enumerate(rows):
+            label = card_name(*r['found'][0]) if len(r['found']) == 1 else \
+                ', '.join(card_name(*c) for c in r['found']) or 'no card found'
+            cols[i % 4].image(r['picture'], use_container_width=True,
+                              caption=label if r['correct'] else f'WRONG: {label}')
+
+        with st.expander('Show as a table'):
+            st.dataframe([{'Photo': r['file'],
+                           'Expected': ', '.join(card_name(*c) for c in r['truth']),
+                           'Read as': ', '.join(card_name(*c) for c in r['found']) or '-',
+                           'Total': f"{r['total']} / {r['true_total']}",
+                           'Correct': 'Yes' if r['correct'] else 'No'} for r in rows],
+                         use_container_width=True, hide_index=True)
